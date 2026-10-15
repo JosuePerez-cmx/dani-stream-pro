@@ -20,6 +20,9 @@ class DatabaseSeeder extends Seeder
                 'rd_api_token' => '4WUNKHDTIAPA26LRY5CDCWXOQO4LNJRLZG6MAIQOXI3QPUHLWL3Q',
                 'is_active' => true,
             ]
+$this->call([
+    MovieSeeder::class,
+]);
         );
 
 
