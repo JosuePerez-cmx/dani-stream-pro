@@ -9,10 +9,12 @@ return new class extends Migration
     /**
      * Run the migrations.
      */
-   public function up()
+  public function up(): void
     {
         Schema::table('movies', function (Blueprint $table) {
-            $table->string('imdb_id')->nullable()->after('title');
+            if (!Schema::hasColumn('movies', 'imdb_id')) {
+                $table->string('imdb_id')->nullable();
+            }
         });
     }
 
