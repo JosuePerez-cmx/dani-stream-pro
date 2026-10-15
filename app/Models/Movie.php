@@ -7,11 +7,13 @@ use Illuminate\Database\Eloquent\Model;
 class Movie extends Model
 {
     protected $fillable = [
-        'title',
-        'release_title', 
         'imdb_id',
-        'magnet_link',
-        'size_gb',
+        'info_hash',
+        'title',
+        'filename',
+        'size_bytes',
+        'resolution',
+        'provider',
         'is_active',
         'last_kept_alive_at',
     ];

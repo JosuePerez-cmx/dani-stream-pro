@@ -8,21 +8,25 @@ use Illuminate\Support\Facades\Http;
 
 class DaniSearchCommand extends Command
 {
-    protected $signature = 'dani:search {query} {--min-gb=5} {--max-gb=25}';
-    protected $description = 'Busca en Prowlarr, verifica caché en Real-Debrid y guarda en SQLite';
+    // Soporte para búsqueda manual exacta y parámetros limpios
+    protected $signature = 'dani:search {imdb_id} {title} {year} {--manual=}';
+    protected $description = 'Busca, filtra, valida caché en RD y guarda. Usa --manual para búsquedas exactas.';
 
     public function handle()
     {
-        $query = $this->argument('query');
-        $minSize = $this->option('min-gb') * 1073741824; // Convertir GB a Bytes
-        $maxSize = $this->option('max-gb') * 1073741824;
+        $imdbId = $this->argument('imdb_id');
+        $title = $this->argument('title');
+        $year = $this->argument('year');
+        $manualQuery = $this->option('manual');
+        
+        // Si mandas --manual, usa esa frase en Prowlarr; si no, el default (Título + Año)
+        $searchQuery = $manualQuery ? $manualQuery : "{$title} {$year}";
         $rdToken = env('REAL_DEBRID_TOKEN');
 
-        $this->info("Buscando '{$query}' en Prowlarr (entre {$this->option('min-gb')}GB y {$this->option('max-gb')}GB)...");
+        $this->info("Buscando '{$searchQuery}' en Prowlarr...");
 
-        // Cambia el puerto/API_KEY por los de tu Prowlarr
         $prowlarrResponse = Http::get("http://127.0.0.1:9696/api/v1/search", [
-            'query' => $query,
+            'query' => $searchQuery,
             'apikey' => '66a340ec72814af7be29c5945c256ccf',
             'type' => 'search'
         ]);
@@ -34,42 +38,64 @@ class DaniSearchCommand extends Command
 
         $results = $prowlarrResponse->json();
         
+        // 4K: Ahora de 5GB a 20GB. | 1080p: de 1GB a 8GB.
+        $this->procesarResolucion($results, '2160p', $imdbId, $title, $year, $rdToken, 5368709120, 21474836480); 
+        $this->procesarResolucion($results, '1080p', $imdbId, $title, $year, $rdToken, 1073741824, 8589934592); 
+    }
+
+    private function procesarResolucion($results, $resolucion, $imdbId, $title, $year, $rdToken, $minBytes, $maxBytes)
+    {
+        $this->warn("--- Buscando versión {$resolucion} ---");
+        
+        // Filtro de idiomas expandido
+        $regexLatino = '/(?i)(latino|lat|dual|multi|spa|spanish)/';
+        $regexRes = $resolucion === '2160p' ? '/(?i)(2160p|4k)/' : '/(?i)(1080p)/';
+
         foreach ($results as $result) {
-            // Filtrar por tamaño y asegurar que sea Magnet
-            if ($result['size'] >= $minSize && $result['size'] <= $maxSize && isset($result['infoUrl']) && str_starts_with($result['infoUrl'], 'magnet:')) {
-                
-                // Extraer el Hash del Magnet
-                preg_match('/xt=urn:btih:([^&]+)/', $result['infoUrl'], $matches);
-                if (!isset($matches[1])) continue;
-                $hash = strtoupper($matches[1]);
+            $nombreOriginal = $result['title'];
+            $size = $result['size'];
+            $magnet = $result['infoUrl'] ?? '';
 
-                $this->info("Verificando disponibilidad en RD para: " . $result['title']);
+            // El chivato para ver todo en la consola
+            $this->line("🔍 Prowlarr vio: " . $nombreOriginal . " | Peso: " . round($size / 1073741824, 2) . " GB");
 
-                // Magia: Preguntar a Real-Debrid si ya lo tiene cacheado al 100%
-                $rdCheck = Http::withToken($rdToken)->get("https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/{$hash}");
-                $availability = $rdCheck->json();
-
-                // Si está cacheado (RD devuelve datos dentro del hash)
-                if (isset($availability[$hash]) && isset($availability[$hash]['rd']) && count($availability[$hash]['rd']) > 0) {
+            if (str_starts_with($magnet, 'magnet:') && $size >= $minBytes && $size <= $maxBytes) {
+                if (preg_match($regexRes, $nombreOriginal)) {
                     
-                    // Lo guardamos en tu Bóveda
-                    $movie = Movie::create([
-                        'title' => $query,
-                        'release_title' => $result['title'],
-                        'magnet_link' => $result['infoUrl'],
-                        'size_gb' => round($result['size'] / 1073741824, 2),
-                        'is_active' => true,
-                    ]);
+                    // Magia: Validar el idioma O saltarse el filtro si usaste --manual
+                    if (preg_match($regexLatino, $nombreOriginal) || $this->option('manual')) {
+                        
+                        preg_match('/xt=urn:btih:([^&]+)/', $magnet, $matches);
+                        if (!isset($matches[1])) continue;
+                        $hash = strtoupper($matches[1]);
 
-                    $this->info("✅ ¡Éxito! Guardado en la bóveda (ID: {$movie->id}). Este enlace reproducirá al instante.");
-                    $this->line("Tamaño: {$movie->size_gb} GB");
-                    return; // Terminamos la búsqueda al encontrar el primer oro puro
-                } else {
-                    $this->warn("❌ No está cacheado en RD. Descartando y probando el siguiente...");
+                        // Verificar en Real-Debrid
+                        $rdCheck = Http::withToken($rdToken)->get("https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/{$hash}");
+                        $availability = $rdCheck->json();
+
+                        if (isset($availability[$hash]) && isset($availability[$hash]['rd']) && count($availability[$hash]['rd']) > 0) {
+                            
+                            $filename = "[Dani] {$title} {$year} {$resolucion} [🌎 Latino].mkv";
+
+                            Movie::updateOrCreate(
+                                ['imdb_id' => $imdbId, 'resolution' => $resolucion],
+                                [
+                                    'info_hash' => $hash,
+                                    'title' => $title,
+                                    'filename' => $filename,
+                                    'size_bytes' => $size,
+                                    'is_active' => true
+                                ]
+                            );
+
+                            $sizeGb = round($size / 1073741824, 2);
+                            $this->info("✅ Guardado {$resolucion}: {$filename} ({$sizeGb} GB)");
+                            return; 
+                        }
+                    }
                 }
             }
         }
-
-        $this->error("No se encontraron versiones de ese tamaño que estén 100% listas en Real-Debrid.");
+        $this->error("❌ No se encontró versión {$resolucion} cacheada en RD con esos criterios.");
     }
 }
